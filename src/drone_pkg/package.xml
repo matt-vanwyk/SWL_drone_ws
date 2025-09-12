@@ -1,13 +1,16 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>drone_pkg</name>
+  <name>base_package</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
   <maintainer email="matt.vanwyk2@gmail.com">spiderweb</maintainer>
   <license>TODO: License declaration</license>
 
-  <depend>rclpy</depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>swl_drone_interfaces</exec_depend>
+  <exec_depend>swl_shared_interfaces</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
