@@ -20,7 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'drone_state_machine = drone_pkg.drone_state_machine:main'
+            'drone_state_machine = drone_pkg.drone_state_machine:main',
+            'mavsdk_node = drone_pkg.mavsdk_node:main'
         ],
     },
 )
