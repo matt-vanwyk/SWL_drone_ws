@@ -3,7 +3,7 @@
 import rclpy
 import time
 import threading
-from swl_shared_interfaces.srv import DroneCommand
+from swl_shared_interfaces.srv import DroneCommand, DroneState
 from rclpy.node import Node
 from statemachine import StateMachine, State
 from rclpy.callback_groups import ReentrantCallbackGroup
