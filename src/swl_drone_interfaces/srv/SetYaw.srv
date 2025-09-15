@@ -1,0 +1,7 @@
+# swl_drone_interfaces/srv/SetYaw.srv
+
+bool yaw_cw
+float64 yaw_degrees
+---
+bool success
+string message

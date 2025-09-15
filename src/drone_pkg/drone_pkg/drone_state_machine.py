@@ -3,14 +3,16 @@
 import rclpy
 import time
 import threading
+from concurrent.futures import Future as ConcurrentFuture
 from swl_shared_interfaces.srv import DroneCommand
 from swl_shared_interfaces.msg import DroneState
 from swl_drone_interfaces.msg import Telemetry
-from swl_drone_interfaces.srv import UploadMission
+from swl_drone_interfaces.srv import UploadMission, SetYaw
 from std_msgs.msg import Header
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
 from statemachine import StateMachine, State
-from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.task import Future
 
 class DroneStateMachine(StateMachine):
@@ -46,15 +48,15 @@ class DroneStateMachine(StateMachine):
         
     def on_enter_Ready_To_Fly(self):
         """Called when entering Ready_To_Fly state"""
-        self.model.get_logger().info("Drone ready for missions - awaiting mission upload")
+        self.model.get_logger().info("State change: IDLE -> READY TO FLY")
 
     def on_enter_Mission_Uploaded(self):
         """Called when mission upload completes"""
-        self.model.get_logger().info("Mission uploaded successfully - ready for arming")
+        self.model.get_logger().info("State change: READY_TO_FLY -> MISSION_UPLOADED")
 
     def on_enter_Mission_In_Progress(self):
         """Called when flying mission"""
-        self.model.get_logger().info("Mission in progress - flying to waypoints")
+        self.model.get_logger().info("State change: MISSION_UPLOADED -> MISSION_IN_PROGRESS")
 
     def on_enter_Loiter(self):
         """Called when loitering at waypoint"""
@@ -86,13 +88,17 @@ class DroneStateMachineNode(Node):
         super().__init__('drone_state_machine')
         self.state_machine = DroneStateMachine(model=self)
 
-        self.callback_group = ReentrantCallbackGroup()
+        # Create callback groups for different types of operations
+        self.service_callback_group = ReentrantCallbackGroup()
+        self.client_callback_group = ReentrantCallbackGroup()
+        self.timer_callback_group = MutuallyExclusiveCallbackGroup()
 
-        # Service server for base station commands
+        # Service server for base station commands (uses reentrant group for nested calls)
         self.drone_command_service = self.create_service(
             DroneCommand,
             'drone/command',
-            self.handle_drone_command
+            self.handle_drone_command,
+            callback_group=self.service_callback_group
         )
 
         # Publisher for drone state (to base station)
@@ -102,14 +108,19 @@ class DroneStateMachineNode(Node):
             10
         )
 
-        # Service client for MAVSDK node
+        # Service client for MAVSDK node (uses reentrant group for nested calls)
         self.mavsdk_upload_mission_client = self.create_client(
             UploadMission,
             'drone/upload_mission',
-            callback_group=self.callback_group
+            callback_group=self.client_callback_group
         )
 
-        self.mavsdk_upload_mission_client.wait_for_service(timeout_sec=10.0)
+        # Service client for MAVSDK yaw control
+        self.mavsdk_yaw_client = self.create_client(
+            SetYaw,
+            'drone/set_yaw',
+            callback_group=self.client_callback_group
+        )
 
         # Subscriber for MAVSDK telemetry (from MAVSDK node)
         self.telemetry_subscriber = self.create_subscription(
@@ -139,9 +150,29 @@ class DroneStateMachineNode(Node):
         self.get_logger().info('Drone State Machine node started')
         self.get_logger().info(f'Initial state: {self.state_machine.current_state.name}')
 
-        self.publish_drone_state()
+        # Use timer callback group for periodic publishing
+        self.state_publish_timer = self.create_timer(
+            1.0, 
+            self.publish_drone_state,
+            callback_group=self.timer_callback_group
+        )
 
-        self.state_publish_timer = self.create_timer(1.0, self.publish_drone_state)
+        # Wait for MAVSDK service to be available
+        self.get_logger().info('Waiting for MAVSDK upload mission service...')
+        if not self.mavsdk_upload_mission_client.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error('MAVSDK upload mission service not available!')
+        else:
+            self.get_logger().info('MAVSDK upload mission service connected')
+
+        # Wait for MAVSDK yaw service
+        self.get_logger().info('Waiting for MAVSDK yaw service...')
+        if not self.mavsdk_yaw_client.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error('MAVSDK yaw service not available!')
+        else:
+            self.get_logger().info('MAVSDK yaw service connected')
+
+        # Initial state publish
+        self.publish_drone_state()
 
     def telemetry_callback(self, msg):
         """Process raw telemetry from MAVSDK node and drive state transitions"""
@@ -169,19 +200,19 @@ class DroneStateMachineNode(Node):
         current_state = self.state_machine.current_state.name
         
         # Idle -> Ready_To_Fly: Good battery and GPS lock
-        if current_state == 'Idle':
-            if (self.battery_percentage > 20.0 and 
+        if self.state_machine.current_state.name == 'Idle':
+            if (self.battery_percentage > 90.0 and 
                 self.num_satellites >= 6 and 
                 not self.is_armed and 
                 self.landed_state == "ON_GROUND"):
                 
-                self.get_logger().info(f'Telemetry conditions met for Ready_To_Fly: battery={self.battery_percentage:.1f}%, sats={self.num_satellites}')
                 self.state_machine.system_ready()
         
         # Mission_Uploaded -> Mission_In_Progress: Armed and in air
-        elif current_state == 'Mission_Uploaded':
-            if self.is_armed and self.is_in_air:
-                self.get_logger().info('Drone armed and airborne - mission in progress')
+        elif self.state_machine.current_state.name == 'Mission uploaded':
+            self.get_logger().info(f'State check - Armed: {self.is_armed}, In_air: {self.is_in_air}, Alt: {self.current_position["alt"]:.1f}m')
+            if (self.is_armed and self.is_in_air and self.current_position['alt'] >= 8):
+                self.get_logger().info(f'Drone above 8m ({self.current_position["alt"]:.1f}m) - mission in progress')
                 self.state_machine.mission_started()
         
         # Mission_In_Progress -> RTL: Mission complete or return command
@@ -231,63 +262,64 @@ class DroneStateMachineNode(Node):
         msg.drone_id = "DRONE_001"
         msg.current_state = self.state_machine.current_state.name
         
-        # Debug logging (can remove later)
-        if hasattr(self, '_last_published_state') and self._last_published_state != msg.current_state:
-            self.get_logger().info(f'State changed: {self._last_published_state} -> {msg.current_state}')
         self._last_published_state = msg.current_state
 
         self.drone_state_publisher.publish(msg)
 
     def handle_drone_command(self, request, response):
-        """Handle commands from base station"""
+        """Handle commands from base station - SYNCHRONOUS but allows nested async calls"""
         self.get_logger().info(f'Received drone command: {request.command_type}')
         
         if request.command_type == 'upload_mission':
-            response.success = self.handle_mission_upload(request)
+            # This will block until the nested service call completes
+            response.success = self.handle_mission_upload_sync(request)
+        elif request.command_type == 'pan_right':
+            response.success = self.handle_pan_right(request)
         else:
             response.success = False
             self.get_logger().warn(f'Unknown drone command: {request.command_type}')
         
         return response
 
-    def handle_mission_upload(self, request):
-        """Handle mission upload from base station"""
+    def handle_mission_upload_sync(self, request):
+        """Handle mission upload synchronously - waits for MAVSDK response before returning"""
         
         # Validate state
         if self.state_machine.current_state.name != 'Ready to fly':
-            self.get_logger().error(f'Cannot upload mission - drone not in Ready to fly state. Current: {self.state_machine.current_state.name}')
+            self.get_logger().error(f'Cannot upload mission - drone not in Ready_To_Fly state. Current: {self.state_machine.current_state.name}')
             return False
 
-        # Store mission data (but don't transition state yet)
+        # Store mission data
         self.current_mission_waypoints = request.waypoints
         self.current_mission_id = request.drone_id
 
-        self.get_logger().info(f'Mission received from base station - {len(request.waypoints)} waypoints')
+        # Use threading event to wait for async response
+        success_event = threading.Event()
+        upload_success = [False]  # Use list to allow modification in nested function
+        error_message = ['']
 
-        # Forward mission to MAVSDK node - state transition happens in callback
-        return self.forward_mission_to_mavsdk(request)
-
-    def forward_mission_to_mavsdk(self, request):
-        """Forward mission to MAVSDK node for actual drone upload"""
-    
-        def mavsdk_upload_callback(future: Future):
+        def mavsdk_callback(future: Future):
             try:
                 response = future.result()
                 if response.success:
-                    self.get_logger().info(f'MAVSDK mission upload successful: {response.message}')
+                    self.get_logger().info(f'MAVSDK mission upload successful! Taking off!')
                     self.state_machine.mission_uploaded()
+                    upload_success[0] = True
                 else:
                     self.get_logger().error(f'MAVSDK mission upload failed: {response.message}')
-                    # Stay in Ready_To_Fly state since upload failed
-                    # Clear the stored mission data
+                    error_message[0] = response.message
+                    # Clear the stored mission data on failure
                     self.current_mission_waypoints = []
                     self.current_mission_id = None
                     
             except Exception as e:
                 self.get_logger().error(f'MAVSDK upload service call failed: {str(e)}')
+                error_message[0] = str(e)
                 self.current_mission_waypoints = []
                 self.current_mission_id = None
-        
+            finally:
+                success_event.set()  # Signal completion regardless of success/failure
+
         try:
             # Create MAVSDK upload request
             mavsdk_request = UploadMission.Request()
@@ -295,25 +327,75 @@ class DroneStateMachineNode(Node):
             
             # Make the async service call
             future = self.mavsdk_upload_mission_client.call_async(mavsdk_request)
-            future.add_done_callback(mavsdk_upload_callback)
+            future.add_done_callback(mavsdk_callback)
             
-            self.get_logger().info('Mission forwarded to MAVSDK node - awaiting confirmation...')
-            return True  # Return immediately since this is async
+            self.get_logger().info('Mission forwarded to MAVSDK node - waiting for response...')
             
+            # Wait for the async call to complete (with timeout)
+            if success_event.wait(timeout=30.0):  # 30 second timeout
+                if upload_success[0]:
+                    return True
+                else:
+                    self.get_logger().error(f'Mission upload failed: {error_message[0]}')
+                    return False
+            else:
+                self.get_logger().error('Mission upload timed out!')
+                # Cancel the future if possible and clean up
+                if not future.done():
+                    future.cancel()
+                self.current_mission_waypoints = []
+                self.current_mission_id = None
+                return False
+                
         except Exception as e:
-            self.get_logger().error(f'Failed to forward mission to MAVSDK: {str(e)}')
+            self.get_logger().error(f'Failed to initiate mission upload to MAVSDK: {str(e)}')
             return False
+
+    def handle_pan_right(self, request):
+        """Flexible pan control with exact degrees"""
+        self.get_logger().info(f'Drone received pan: {request.yaw_cw}°')
+
+        yaw_clockwise = request.yaw_cw > 0
+        yaw_degrees = abs(request.yaw_cw)
+
+        self.get_logger().info(f'Processing pan: {yaw_degrees:.1f}° {"clockwise" if yaw_clockwise else "counter-clockwise"}')
+
+        pan_request = SetYaw.Request()
+        pan_request.yaw_cw = yaw_clockwise
+        pan_request.yaw_degrees = yaw_degrees
+
+        def pan_mavsdk_callback(future):
+            try:
+                response = future.result()
+                if response.success:
+                    direction = "right" if yaw_clockwise else "left"
+                    self.get_logger().info(f'MAVSDK pan executed: {yaw_degrees:.1f}° {direction}')
+                else:
+                    self.get_logger().warn(f'MAVSDK pan failed: {response.message}')
+            except Exception as e:
+                self.get_logger().error(f'MAVSDK pan service failed: {str(e)}')
+
+        future = self.mavsdk_yaw_client.call_async(pan_request)
+        future.add_done_callback(pan_mavsdk_callback)
+
+        return True
 
 def main():
     rclpy.init()
     
+    # Create the node
     drone_state_machine = DroneStateMachineNode()
     
+    # Create MultiThreadedExecutor with multiple threads
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(drone_state_machine)
+    
     try:
-        rclpy.spin(drone_state_machine)
+        executor.spin()
     except KeyboardInterrupt:
         drone_state_machine.get_logger().info('Drone State Machine shutting down...')
     finally:
+        executor.shutdown()
         drone_state_machine.destroy_node()
         rclpy.shutdown()
 
