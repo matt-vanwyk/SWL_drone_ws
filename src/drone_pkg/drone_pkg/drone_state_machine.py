@@ -22,9 +22,8 @@ class DroneStateMachine(StateMachine):
     Ready_To_Fly = State()
     Mission_Uploaded = State()
     Mission_In_Progress = State()
-    Loiter = State()
-    Pan = State()
     RTL = State()
+    Loiter = State()
     Landing = State()
     Landed = State()
     Charging = State()
@@ -32,11 +31,9 @@ class DroneStateMachine(StateMachine):
     system_ready = Idle.to(Ready_To_Fly)
     mission_uploaded = Ready_To_Fly.to(Mission_Uploaded)
     mission_started = Mission_Uploaded.to(Mission_In_Progress)
-    waypoint_reached = Mission_In_Progress.to(Loiter)
-    start_yawing = Loiter.to(Pan)
-    finish_yawing = Pan.to(Loiter)
-    return_to_launch = Mission_In_Progress.to(RTL) | Loiter.to(RTL) | Pan.to(RTL)
-    start_landing = RTL.to(Landing)
+    return_to_launch = Mission_In_Progress.to(RTL)
+    reached_home = RTL.to(Loiter)
+    start_landing = Loiter.to(Landing)
     drone_landed = Landing.to(Landed)
     start_charging = Landed.to(Charging)
     fully_charged = Charging.to(Ready_To_Fly)
@@ -58,17 +55,13 @@ class DroneStateMachine(StateMachine):
         """Called when flying mission"""
         self.model.get_logger().info("State change: MISSION_UPLOADED -> MISSION_IN_PROGRESS")
 
-    def on_enter_Loiter(self):
-        """Called when loitering at waypoint"""
-        self.model.get_logger().info("Loitering at waypoint")
-
-    def on_enter_Pan(self):
-        """Called when yawing/panning at waypoint"""
-        self.model.get_logger().info("Panning/yawing at waypoint")
-
     def on_enter_RTL(self):
         """Called when returning to launch"""
         self.model.get_logger().info("State change: MISSION_PROGRESS -> RTL")
+
+    def on_enter_Loiter(self):
+        """Called when drone reaches home and enters loiter"""
+        self.model.get_logger().info("State change: RTL -> LOITER - Drone has returned home and is holding position")
 
     def on_enter_Landing(self):
         """Called when landing sequence started"""
@@ -215,16 +208,29 @@ class DroneStateMachineNode(Node):
                 self.state_machine.mission_started()
         
         # Mission_In_Progress -> RTL: Mission complete or return command
+        #TODO we will need to somehow handle the automatic RTL when the drone is doing a patrol. For now we are doing automatic deployment and manual RTL
+        # elif current_state == 'Mission_In_Progress':
+        #     if self.mission_complete:
+        #         self.get_logger().info('Mission complete - returning to launch')
+        #         self.state_machine.return_to_launch()
+
+        # Mission_In_Progress -> RTL: Mission complete (handled by return_to_base command)
         elif current_state == 'Mission_In_Progress':
             if self.mission_complete:
-                self.get_logger().info('Mission complete - returning to launch')
-                self.state_machine.return_to_launch()
+                self.get_logger().info('Mission complete - would transition to RTL (if not manually commanded)')
+                # Note: RTL transition now happens via return_to_base command, not automatic
         
-        # RTL -> Landing: Altitude getting low and near home
-        elif current_state == 'RTL':
-            if self.current_position['alt'] < 5.0 and not self.is_in_air:
-                self.get_logger().info('Landing sequence detected')
-                self.state_machine.start_landing()
+        # RTL -> Loiter: Mission complete AND in HOLD mode (reached home)
+        elif self.state_machine.current_state.name == 'Rtl':
+            if self.mission_complete and str(self.flight_mode) == "HOLD":
+                self.get_logger().info('RTL mission complete - drone has reached home and is in HOLD mode')
+                self.state_machine.reached_home()
+        
+        # Loiter -> Landing: Manual landing command or low battery (future implementation)
+        elif current_state == 'Loiter':
+            # For now, landing will be triggered by manual command
+            # Future: Could add automatic landing on low battery
+            pass
         
         # Landing -> Landed: On ground and disarmed
         elif current_state == 'Landing':
@@ -403,6 +409,7 @@ class DroneStateMachineNode(Node):
                 response = future.result()
                 if response.success:
                     self.get_logger().info('MAVSDK RTL mission upload successful. Returning to base!')
+                    self.mission_complete = False
                     self.state_machine.return_to_launch()
                     upload_success[0] = True
                 else:
