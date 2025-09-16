@@ -68,7 +68,7 @@ class DroneStateMachine(StateMachine):
 
     def on_enter_RTL(self):
         """Called when returning to launch"""
-        self.model.get_logger().info("Returning to launch point")
+        self.model.get_logger().info("State change: MISSION_PROGRESS -> RTL")
 
     def on_enter_Landing(self):
         """Called when landing sequence started"""
@@ -274,6 +274,8 @@ class DroneStateMachineNode(Node):
             response.success = self.handle_mission_upload_sync(request)
         elif request.command_type == 'pan':
             response.success = self.handle_pan(request)
+        elif request.command_type == 'return_to_base':
+            response.success = self.handle_return_to_base_sync(request)
         else:
             response.success = False
             self.get_logger().warn(f'Unknown drone command: {request.command_type}')
@@ -301,7 +303,7 @@ class DroneStateMachineNode(Node):
             try:
                 response = future.result()
                 if response.success:
-                    self.get_logger().info(f'MAVSDK mission upload successful! Taking off!')
+                    self.get_logger().info(f'MAVSDK mission upload successful. Taking off!')
                     self.state_machine.mission_uploaded()
                     upload_success[0] = True
                 else:
@@ -377,6 +379,77 @@ class DroneStateMachineNode(Node):
         future.add_done_callback(pan_mavsdk_callback)
 
         return True
+
+    def handle_return_to_base_sync(self, request):
+        """Handle return to base synchronously - waits for MAVSDK response before returning"""
+        
+        # Validate state (should be Mission_In_Progress or related)
+        current_state = self.state_machine.current_state.name
+        if current_state not in ['Mission in progress', 'Loiter', 'Pan']:
+            self.get_logger().error(f'Cannot return to base from state: {current_state}')
+            return False
+        
+        # Store RTL mission data
+        self.current_mission_waypoints = request.waypoints
+        self.current_mission_id = f"RTL_{request.drone_id}"
+        
+        # Use threading event to wait for async response
+        success_event = threading.Event()
+        upload_success = [False]  # Use list to allow modification in nested function
+        error_message = ['']
+
+        def mavsdk_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info('MAVSDK RTL mission upload successful. Returning to base!')
+                    self.state_machine.return_to_launch()
+                    upload_success[0] = True
+                else:
+                    self.get_logger().error(f'MAVSDK RTL mission upload failed: {response.message}')
+                    error_message[0] = response.message
+                    # Clear the stored mission data on failure
+                    self.current_mission_waypoints = []
+                    self.current_mission_id = None
+                    
+            except Exception as e:
+                self.get_logger().error(f'MAVSDK RTL upload service call failed: {str(e)}')
+                error_message[0] = str(e)
+                self.current_mission_waypoints = []
+                self.current_mission_id = None
+            finally:
+                success_event.set()  # Signal completion regardless of success/failure
+
+        try:
+            # Create MAVSDK upload request
+            mavsdk_request = UploadMission.Request()
+            mavsdk_request.waypoints = request.waypoints
+            
+            # Make the async service call
+            future = self.mavsdk_upload_mission_client.call_async(mavsdk_request)
+            future.add_done_callback(mavsdk_callback)
+            
+            self.get_logger().info('RTL mission forwarded to MAVSDK node - waiting for response...')
+            
+            # Wait for the async call to complete (with timeout)
+            if success_event.wait(timeout=30.0):  # 30 second timeout
+                if upload_success[0]:
+                    return True
+                else:
+                    self.get_logger().error(f'RTL mission upload failed: {error_message[0]}')
+                    return False
+            else:
+                self.get_logger().error('RTL mission upload timed out!')
+                # Cancel the future if possible and clean up
+                if not future.done():
+                    future.cancel()
+                self.current_mission_waypoints = []
+                self.current_mission_id = None
+                return False
+                
+        except Exception as e:
+            self.get_logger().error(f'Failed to initiate RTL mission upload to MAVSDK: {str(e)}')
+            return False
 
 def main():
     rclpy.init()

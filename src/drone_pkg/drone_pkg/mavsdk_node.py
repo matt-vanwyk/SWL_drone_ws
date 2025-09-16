@@ -321,68 +321,7 @@ class MAVSDKNode(Node):
                 self.get_logger().error("Could not get flight mode during error")
                 
             return {"success": False, "message": f"Error: {str(e)}"}
-
-    # async def set_yaw(self, request):
-    #     """Execute yaw/pan using mission upload approach"""
-    #     try:
-    #         self.get_logger().info(f'Flight mode: {self.flight_mode}')
             
-    #         if str(self.flight_mode) != "HOLD":
-    #             return {"success": False, "message": f"Unsafe mode: {self.flight_mode}"}
-            
-    #         current_position = await self.drone.telemetry.position().__anext__()
-    #         self.get_logger().info(f'Position: {current_position.latitude_deg:.6f}, {current_position.longitude_deg:.6f}, {current_position.relative_altitude_m:.1f}m')
-            
-    #         # Get current heading
-    #         self.get_logger().info("Getting current heading...")
-    #         current_heading = await self.drone.telemetry.heading().__anext__()
-    #         current_yaw = current_heading.heading_deg
-    #         self.get_logger().info(f'Current heading: {current_yaw:.1f}°')
-            
-    #         # Calculate target yaw
-    #         if request.yaw_cw:
-    #             target_yaw = (current_yaw + request.yaw_degrees) % 360
-    #         else:
-    #             target_yaw = (current_yaw - request.yaw_degrees) % 360
-            
-    #         self.get_logger().info(f'Target yaw: {target_yaw:.1f}° (change: {"+" if request.yaw_cw else "-"}{request.yaw_degrees}°)')
-            
-    #         # Create mission item
-    #         self.get_logger().info("Creating mission item...")
-    #         mission_items = [MissionItem(
-    #             current_position.latitude_deg,
-    #             current_position.longitude_deg,
-    #             current_position.relative_altitude_m,
-    #             0,  # Add speed back
-    #             True,
-    #             float('nan'), 
-    #             float('nan'),
-    #             MissionItem.CameraAction.NONE,
-    #             float('nan'),  # No loiter time for yaw change
-    #             float('nan'), 
-    #             float('nan'),
-    #             target_yaw,
-    #             float('nan'),
-    #             MissionItem.VehicleAction.NONE
-    #         )]
-            
-    #         self.get_logger().info("Creating mission plan...")
-    #         mission_plan = MissionPlan(mission_items)
-            
-    #         self.get_logger().info("Clearing current mission...")
-    #         await self.drone.mission.clear_mission()
-            
-    #         self.get_logger().info("Uploading yaw mission...")
-    #         await self.drone.mission.upload_mission(mission_plan)
-            
-    #         self.get_logger().info("Starting yaw mission...")
-    #         await self.drone.mission.start_mission()
-    #         return {"success": True, "message": f"Yaw changed to {target_yaw:.1f}°"}
-            
-    #     except Exception as e:
-    #         self.get_logger().error(f"=== YAW DEBUG FAILED: {str(e)} ===")
-    #         return {"success": False, "message": f"Error: {str(e)}"}
-
 def main():
     rclpy.init()
     node = MAVSDKNode()
