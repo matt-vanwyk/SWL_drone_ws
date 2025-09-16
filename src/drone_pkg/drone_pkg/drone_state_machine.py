@@ -210,9 +210,8 @@ class DroneStateMachineNode(Node):
         
         # Mission_Uploaded -> Mission_In_Progress: Armed and in air
         elif self.state_machine.current_state.name == 'Mission uploaded':
-            self.get_logger().info(f'State check - Armed: {self.is_armed}, In_air: {self.is_in_air}, Alt: {self.current_position["alt"]:.1f}m')
             if (self.is_armed and self.is_in_air and self.current_position['alt'] >= 8):
-                self.get_logger().info(f'Drone above 8m ({self.current_position["alt"]:.1f}m) - mission in progress')
+                # self.get_logger().info(f'Drone above 8m ({self.current_position["alt"]:.1f}m) - mission in progress')
                 self.state_machine.mission_started()
         
         # Mission_In_Progress -> RTL: Mission complete or return command
@@ -273,8 +272,8 @@ class DroneStateMachineNode(Node):
         if request.command_type == 'upload_mission':
             # This will block until the nested service call completes
             response.success = self.handle_mission_upload_sync(request)
-        elif request.command_type == 'pan_right':
-            response.success = self.handle_pan_right(request)
+        elif request.command_type == 'pan':
+            response.success = self.handle_pan(request)
         else:
             response.success = False
             self.get_logger().warn(f'Unknown drone command: {request.command_type}')
@@ -351,14 +350,13 @@ class DroneStateMachineNode(Node):
             self.get_logger().error(f'Failed to initiate mission upload to MAVSDK: {str(e)}')
             return False
 
-    def handle_pan_right(self, request):
+    def handle_pan(self, request):
         """Flexible pan control with exact degrees"""
-        self.get_logger().info(f'Drone received pan: {request.yaw_cw}°')
 
         yaw_clockwise = request.yaw_cw > 0
         yaw_degrees = abs(request.yaw_cw)
 
-        self.get_logger().info(f'Processing pan: {yaw_degrees:.1f}° {"clockwise" if yaw_clockwise else "counter-clockwise"}')
+        self.get_logger().info(f'Sending pan: {yaw_degrees:.1f}° {"clockwise" if yaw_clockwise else "counter-clockwise"}')
 
         pan_request = SetYaw.Request()
         pan_request.yaw_cw = yaw_clockwise

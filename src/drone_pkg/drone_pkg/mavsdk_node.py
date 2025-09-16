@@ -266,17 +266,11 @@ class MAVSDKNode(Node):
     async def set_yaw(self, request):
         """Execute yaw/pan using mission upload approach"""
         try:
-            self.get_logger().info("=== YAW DEBUG START ===")
-            
-            # Check current flight mode
-            #current_flight_mode = await self.drone.telemetry.flight_mode().__anext__()
             self.get_logger().info(f'Flight mode: {self.flight_mode}')
             
             if str(self.flight_mode) != "HOLD":
                 return {"success": False, "message": f"Unsafe mode: {self.flight_mode}"}
             
-            # Get current position
-            self.get_logger().info("Getting current position...")
             current_position = await self.drone.telemetry.position().__anext__()
             self.get_logger().info(f'Position: {current_position.latitude_deg:.6f}, {current_position.longitude_deg:.6f}, {current_position.relative_altitude_m:.1f}m')
             
@@ -302,10 +296,12 @@ class MAVSDKNode(Node):
                 current_position.relative_altitude_m,
                 5.0,  # Add speed back
                 True,
-                float('nan'), float('nan'),
+                float('nan'), 
+                float('nan'),
                 MissionItem.CameraAction.NONE,
-                0.0,  # No loiter time for yaw change
-                float('nan'), float('nan'),
+                float('nan'),  # No loiter time for yaw change
+                float('nan'), 
+                float('nan'),
                 target_yaw,
                 float('nan'),
                 MissionItem.VehicleAction.NONE
@@ -322,8 +318,6 @@ class MAVSDKNode(Node):
             
             self.get_logger().info("Starting yaw mission...")
             await self.drone.mission.start_mission()
-            
-            self.get_logger().info("=== YAW DEBUG SUCCESS ===")
             return {"success": True, "message": f"Yaw changed to {target_yaw:.1f}°"}
             
         except Exception as e:
