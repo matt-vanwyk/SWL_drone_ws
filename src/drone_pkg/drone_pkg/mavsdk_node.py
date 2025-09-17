@@ -65,8 +65,9 @@ class MAVSDKNode(Node):
         
         self.loop = asyncio.get_event_loop()
 
-        # We'll start the position updates after connecting to the drone
-
+################################################
+# START UP AND CONNECT FUNCTIONS
+################################################
     async def start(self):
         await self.connect_to_drone()
         
@@ -82,8 +83,6 @@ class MAVSDKNode(Node):
         self.loop.create_task(self.update_mission_progress())
         self.loop.create_task(self.update_drone_heading())
         
-        # self.loop.run_until_complete(self.update_velocity())
-        
         await asyncio.sleep(1)
         # Create timers for publishers
         self.create_timer(0.5, self.publish_telemetry)
@@ -96,7 +95,9 @@ class MAVSDKNode(Node):
         except Exception as e:
             self.get_logger().error(f"Error during connection and initialization: {str(e)}")
 
-    ### Add async functions to update telemetry data
+################################################
+#START - ASYNC FUNCTIONS TO UPDATE TELEMETRY DATA
+################################################
 
     async def update_position(self):
         try:
@@ -182,9 +183,12 @@ class MAVSDKNode(Node):
                 # await asyncio.sleep(0.1)
         except Exception as e:
             self.get_logger().error(f"Error in heading update: {str(e)}")
-            
-###########################
 
+################################################
+#START - ASYNC FUNCTIONS TO UPDATE TELEMETRY DATA
+################################################
+            
+    # Telemetry publish method
     def publish_telemetry(self):
         if self.position:
             state_msg = Telemetry()
@@ -207,7 +211,11 @@ class MAVSDKNode(Node):
             state_msg.header.stamp = self.get_clock().now().to_msg()
             
             self.drone_telemetry_publisher.publish(state_msg)
-    
+
+################################################
+#START - HANDLER FUNCTIONS FOR SERVICE REQUESTS FROM DRONE STATE MACHINE AND ASSOCIATED ASYNC MAVSDK FUNCTIONS 
+################################################   
+
     def handle_upload_mission(self, request, response):
         future = asyncio.run_coroutine_threadsafe(self.upload_mission(request), self.loop)
         result = future.result()
@@ -303,6 +311,7 @@ class MAVSDKNode(Node):
             await self.drone.mission.clear_mission()
             await asyncio.sleep(1.0)
             await self.drone.mission.upload_mission(mission_plan)
+            await self.drone.mission.set_return_to_launch_after_mission(False)
             self.get_logger().info("Yaw mission uploaded successfully")
             await asyncio.sleep(0.5)
             await self.drone.mission.start_mission()
@@ -321,6 +330,10 @@ class MAVSDKNode(Node):
                 self.get_logger().error("Could not get flight mode during error")
                 
             return {"success": False, "message": f"Error: {str(e)}"}
+
+################################################
+#END - HANDLER FUNCTIONS FOR SERVICE REQUESTS FROM DRONE STATE MACHINE AND ASSOCIATED ASYNC MAVSDK FUNCTIONS 
+################################################   
             
 def main():
     rclpy.init()
