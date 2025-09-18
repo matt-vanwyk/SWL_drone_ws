@@ -5,9 +5,9 @@ import time
 import threading
 from concurrent.futures import Future as ConcurrentFuture
 from swl_shared_interfaces.srv import DroneCommand
-from swl_shared_interfaces.msg import DroneState
+from swl_shared_interfaces.msg import DroneState, BaseState
 from swl_drone_interfaces.msg import Telemetry
-from swl_drone_interfaces.srv import UploadMission, SetYaw
+from swl_drone_interfaces.srv import UploadMission, SetYaw, Land
 from std_msgs.msg import Header
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
@@ -61,19 +61,19 @@ class DroneStateMachine(StateMachine):
 
     def on_enter_Loiter(self):
         """Called when drone reaches home and enters loiter"""
-        self.model.get_logger().info("State change: RTL -> LOITER - Drone has returned home and is holding position")
+        self.model.get_logger().info("State change: RTL -> LOITER")
 
     def on_enter_Landing(self):
         """Called when landing sequence started"""
-        self.model.get_logger().info("Landing sequence initiated")
+        self.model.get_logger().info("State change: LOITER -> LANDING")
 
     def on_enter_Landed(self):
         """Called when drone has landed"""
-        self.model.get_logger().info("Drone landed safely")
+        self.model.get_logger().info("State change: LANDING -> LANDED")
 
     def on_enter_Charging(self):
         """Called when charging started"""
-        self.model.get_logger().info("Drone charging...")
+        self.model.get_logger().info("State change: LANDED -> CHARGING")
 
 class DroneStateMachineNode(Node):
     def __init__(self):
@@ -107,11 +107,26 @@ class DroneStateMachineNode(Node):
             callback_group=self.client_callback_group
         )
 
+        # Service client for mavsdk_node Land.srv
+        self.mavsdk_land_client = self.create_client(
+            Land,
+            'drone/land',
+            callback_group=self.client_callback_group
+        )
+
         # Subscriber for mavsdk_node Telemetry.msg
         self.telemetry_subscriber = self.create_subscription(
             Telemetry,
             'drone/telemetry',
             self.telemetry_callback,
+            10
+        )
+
+        # Subscriber for base state machine BaseState.msg 
+        self.base_state_subscriber = self.create_subscription(
+            BaseState,
+            'base/state',
+            self.base_state_callback,
             10
         )
 
@@ -146,6 +161,9 @@ class DroneStateMachineNode(Node):
         self.current_yaw = 0.0
         self.mission_complete = False
 
+        self.previous_base_state = None
+        self.current_base_state = None
+
         self.get_logger().info('Drone State Machine node started')
         self.get_logger().info(f'Initial state: {self.state_machine.current_state.name}')
 
@@ -162,6 +180,13 @@ class DroneStateMachineNode(Node):
             self.get_logger().error('MAVSDK yaw service not available!')
         else:
             self.get_logger().info('MAVSDK yaw service connected')
+
+        # Wait for MAVSDK Land service to be available
+        self.get_logger().info('Waiting for MAVSDK land service...')
+        if not self.mavsdk_land_client.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error('MAVSDK land service not available!')
+        else:
+            self.get_logger().info('MAVSDK land service connected')
 
         # Initial DroneState.msg publish
         self.publish_drone_state()
@@ -237,6 +262,27 @@ class DroneStateMachineNode(Node):
             if not self.is_armed and self.landed_state == "ON_GROUND":
                 self.get_logger().info('Drone has landed and disarmed')
                 self.state_machine.drone_landed()
+        
+        # Landed -> Charging: Landed and base station is charging now (state 011)
+        elif current_state == 'Landed':
+            if not self.is_armed and self.landed_state == "ON_GROUND" and self.current_base_state == 'Charging':
+                self.get_logger().info('Drone has landed and disarmed')
+                self.state_machine.start_charging()
+
+# BASESTATE.MSG CALLBACK FROM BASE STATE MACHINE
+    def base_state_callback(self, msg):
+        """Process base state from base state machine node and drive state transitions"""
+        self.previous_base_state = self.current_base_state
+        self.current_base_state = msg.current_state
+
+        # Only process if state actually changed
+        if self.previous_base_state != self.current_base_state:
+            
+            # Trigger landing when base station is prepared for landing and drone is in Loiter
+            if (self.current_base_state == 'Prepared for landing' and 
+                self.state_machine.current_state.name == 'Loiter'):
+                self.get_logger().info('Base station prepared for landing - initiating drone landing sequence')
+                self.handle_landing_sequence()
 
 # METHOD TO PUBLISH DRONE STATE TO BASE STATE MACHINE
     def publish_drone_state(self):
@@ -464,8 +510,55 @@ class DroneStateMachineNode(Node):
             self.get_logger().error(f'Failed to initiate RTL mission upload to MAVSDK: {str(e)}')
             return False
 
+    def handle_landing_sequence(self):
+        """Initiate landing when base station is ready"""
+        
+        # Use threading event for synchronous landing
+        success_event = threading.Event()
+        landing_success = [False]
+        error_message = ['']
+
+        def landing_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info('MAVSDK landing command successful - drone landing!')
+                    self.state_machine.start_landing()  # Transition to Landing state
+                    landing_success[0] = True
+                else:
+                    self.get_logger().error(f'MAVSDK landing command failed: {response.message}')
+                    error_message[0] = response.message
+            except Exception as e:
+                self.get_logger().error(f'Landing service call failed: {str(e)}')
+                error_message[0] = str(e)
+            finally:
+                success_event.set()
+
+        try:
+            # Create landing request (you'll need to create this service)
+            landing_request = Land.Request()  # You'll need to create Land.srv
+            landing_request.land_trigger = True
+            
+            future = self.mavsdk_land_client.call_async(landing_request)
+            future.add_done_callback(landing_callback)
+            
+            self.get_logger().info('Landing command sent to MAVSDK - waiting for response...')
+            
+            if success_event.wait(timeout=30.0):
+                if landing_success[0]:
+                    self.get_logger().info('Landing sequence initiated successfully!')
+                else:
+                    self.get_logger().error(f'Landing initiation failed: {error_message[0]}')
+            else:
+                self.get_logger().error('Landing command timed out!')
+                if not future.done():
+                    future.cancel()
+                    
+        except Exception as e:
+            self.get_logger().error(f'Failed to initiate landing sequence: {str(e)}')
+
 ####################################################
-# START - HANDLERS FOR DISTINCT DRONE COMMANDS (THESE METHODS ALSO ACT AS SERVER CLIENTS TO MAVSDK NODE)
+# END - HANDLERS FOR DISTINCT DRONE COMMANDS (THESE METHODS ALSO ACT AS SERVER CLIENTS TO MAVSDK NODE)
 ####################################################
 
 def main():

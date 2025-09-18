@@ -8,7 +8,7 @@ from rclpy.node import Node
 from mavsdk import System
 from mavsdk.mission import MissionItem, MissionPlan
 from mavsdk.telemetry import FlightMode
-from swl_drone_interfaces.srv import UploadMission, SetYaw # Reroute, Return, Land
+from swl_drone_interfaces.srv import UploadMission, SetYaw, Land # Reroute, Return
 from swl_drone_interfaces.msg import Telemetry
 
 async def spin(node: Node):
@@ -42,6 +42,12 @@ class MAVSDKNode(Node):
             SetYaw,
             'drone/set_yaw',
             self.handle_set_yaw
+        )
+
+        self.land_server = self.create_service(
+            Land,
+            'drone/land',
+            self.handle_land
         )
 
         # Drone telemetry publisher
@@ -329,6 +335,29 @@ class MAVSDKNode(Node):
             except:
                 self.get_logger().error("Could not get flight mode during error")
                 
+            return {"success": False, "message": f"Error: {str(e)}"}
+
+    def handle_land(self, request, response):
+        """Handle landing command using MAVSDK return_to_launch action"""
+        future = asyncio.run_coroutine_threadsafe(self.execute_landing(request), self.loop)
+        result = future.result()
+        response.success = result['success']
+        response.message = result['message']
+        return response
+
+    async def execute_landing(self, request):
+        """Execute landing using MAVSDK return_to_launch action"""
+        try:
+            self.get_logger().info("Initiating drone landing using RTL action...")
+            
+            # Use return_to_launch action which will land the drone at current position
+            await self.drone.action.return_to_launch()
+            
+            self.get_logger().info("Landing command executed successfully")
+            return {"success": True, "message": "Landing initiated"}
+            
+        except Exception as e:
+            self.get_logger().error(f"Landing failed: {str(e)}")
             return {"success": False, "message": f"Error: {str(e)}"}
 
 ################################################

@@ -1,0 +1,6 @@
+# swl_drone_interfaces/srv/Land.srv
+
+bool land_trigger
+---
+bool success
+string message
