@@ -224,6 +224,7 @@ class MAVSDKNode(Node):
         return response
 
     async def upload_mission(self, request):
+        await self.drone.mission.clear_mission()
         try:
             mission_items = []
             for wp in request.waypoints:
@@ -236,7 +237,7 @@ class MAVSDKNode(Node):
                     float('nan'),  # gimbal_pitch_deg
                     float('nan'),  # gimbal_yaw_deg
                     MissionItem.CameraAction.NONE,
-                    10.0,  # loiter_time_s
+                    float('nan'),  # loiter_time_s
                     float('nan'),  # camera_photo_interval_s
                     float('nan'),  # acceptance_radius_m
                     float('nan'),  # yaw_deg
@@ -247,7 +248,6 @@ class MAVSDKNode(Node):
             mission_plan = MissionPlan(mission_items)
             self.mission_length = len(mission_items)
             self.mission_progress = 0
-            await self.drone.mission.clear_mission()
             await self.drone.mission.upload_mission(mission_plan)
             self.get_logger().info("Mission uploaded successfully")
 
