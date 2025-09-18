@@ -161,6 +161,9 @@ class DroneStateMachineNode(Node):
         self.current_yaw = 0.0
         self.mission_complete = False
 
+        self.fake_battery_percentage = 50 #TODO Remove!
+        self.charging_timer = None #TODO Remove!
+
         self.previous_base_state = None
         self.current_base_state = None
 
@@ -268,6 +271,40 @@ class DroneStateMachineNode(Node):
             if not self.is_armed and self.landed_state == "ON_GROUND" and self.current_base_state == 'Charging':
                 self.get_logger().info('Drone has landed and disarmed')
                 self.state_machine.start_charging()
+                self.fake_charging() # SIMULATION
+        
+        # Charging -> Ready_To_Fly: Battery fully charged
+        elif current_state == 'Charging':
+            if self.fake_battery_percentage >= 95.0: #TODO change to real batt percentage
+                self.get_logger().info('Battery fully charged - drone ready for next mission')
+                self.state_machine.fully_charged()
+
+##############
+# SIMULATION
+##############
+    def fake_charging(self):
+        """Start fake charging simulation"""
+        if self.charging_timer is not None:
+            self.charging_timer.cancel()  # Cancel any existing timer
+        
+        # Charge 5% every 2 seconds (very fast for testing)
+        self.charging_timer = self.create_timer(2.0, self.increment_fake_battery)
+        self.get_logger().info(f"Started charging simulation from {self.fake_battery_percentage:.1f}%")
+
+    def increment_fake_battery(self):
+        """Increment battery by 5% every call"""
+        if self.fake_battery_percentage < 100.0:
+            self.fake_battery_percentage += 5.0
+            self.get_logger().info(f"Charging: Battery at {self.fake_battery_percentage:.1f}%")
+        
+        if self.fake_battery_percentage >= 95.0:
+            # Stop the charging timer
+            if self.charging_timer is not None:
+                self.charging_timer.cancel()
+                self.charging_timer = None
+##############
+# SIMULATION
+##############
 
 # BASESTATE.MSG CALLBACK FROM BASE STATE MACHINE
     def base_state_callback(self, msg):
