@@ -50,6 +50,12 @@ class MAVSDKNode(Node):
             self.handle_return
         )
 
+        self.abort_mission_server = self.create_service(
+            Return,
+            'drone/abort_mission',
+            self.handle_abort_mission
+        )
+
         self.land_server = self.create_service(
             Land,
             'drone/land',
@@ -390,6 +396,71 @@ class MAVSDKNode(Node):
         except Exception as e:
             return {"success": False, "message": f"Error: {str(e)}"}
 
+    def handle_abort_mission(self, request, response):
+        """Handle abort mission command - pause, hold, clear, then upload base coordinates"""
+        future = asyncio.run_coroutine_threadsafe(self.execute_abort_mission(request), self.loop)
+        result = future.result()
+        response.success = result['success']
+        response.message = result['message']
+        return response
+
+    async def execute_abort_mission(self, request):
+        """Execute abort mission sequence using MAVSDK"""
+        try:
+            self.get_logger().info("Starting abort mission sequence...")
+            
+            # Step 1: Pause current mission
+            self.get_logger().info("Pausing current mission...")
+            await self.drone.mission.pause_mission()
+            self.get_logger().info("Mission paused")
+
+            # Step 2: Create mission items for base coordinates
+            self.get_logger().info("Creating abort mission to base coordinates...")
+            mission_items = []
+            for wp in request.waypoints:
+                mission_items.append(MissionItem(
+                    wp.latitude,
+                    wp.longitude,
+                    wp.altitude,
+                    wp.speed,
+                    True,  # is_fly_through
+                    float('nan'),  # gimbal_pitch_deg
+                    float('nan'),  # gimbal_yaw_deg
+                    MissionItem.CameraAction.NONE,
+                    float('nan'),  # loiter_time_s
+                    float('nan'),  # camera_photo_interval_s
+                    float('nan'),  # acceptance_radius_m
+                    float('nan'),  # yaw_deg
+                    float('nan'),   # camera_photo_distance_m
+                    MissionItem.VehicleAction.NONE
+                ))
+            
+            # Step 2: Put drone in hold mode
+            self.get_logger().info("Activating hold mode...")
+            await self.drone.action.hold()
+            self.get_logger().info("Hold mode activated")
+
+            # Step 3: Upload new mission (base coordinates)
+            mission_plan = MissionPlan(mission_items)
+            
+            # Step 4: Clear current mission
+            self.get_logger().info("Clearing current mission...")
+            await self.drone.mission.clear_mission()
+            self.get_logger().info("Mission cleared")
+
+            await self.drone.mission.upload_mission(mission_plan)
+            self.get_logger().info("Abort mission uploaded successfully")
+            
+            # Step 6: Start the abort mission
+            await self.drone.mission.start_mission()
+            self.get_logger().info("Abort mission started - returning to base")
+
+            return {"success": True, "message": "Abort mission completed - drone returning to base coordinates"}
+            
+        except Exception as e:
+            self.get_logger().error(f"Abort mission failed: {str(e)}")
+            return {"success": False, "message": f"Error: {str(e)}"}
+            
     def handle_land(self, request, response):
         """Handle landing command using MAVSDK return_to_launch action"""
         future = asyncio.run_coroutine_threadsafe(self.execute_landing(request), self.loop)

@@ -115,6 +115,13 @@ class DroneStateMachineNode(Node):
             callback_group=self.client_callback_group
         )
 
+        # Service client for mavsdk_node Return.srv (but this is the client for abort_mission command type)
+        self.mavsdk_abort_mission_client = self.create_client(
+            Return,
+            'drone/abort_mission',
+            callback_group=self.client_callback_group
+        )
+
         # Service client for mavsdk_node Land.srv
         self.mavsdk_land_client = self.create_client(
             Land,
@@ -381,6 +388,8 @@ class DroneStateMachineNode(Node):
             response.success = self.handle_pan(request)
         elif request.command_type == 'return_to_base':
             response.success = self.handle_return_to_base_sync(request)
+        elif request.command_type == 'abort_mission':
+            response.success = self.handle_abort_mission_sync(request)
         else:
             response.success = False
             self.get_logger().warn(f'Unknown drone command: {request.command_type}')
@@ -557,6 +566,73 @@ class DroneStateMachineNode(Node):
                 
         except Exception as e:
             self.get_logger().error(f'Failed to initiate RTL mission upload to MAVSDK: {str(e)}')
+            return False
+
+    def handle_abort_mission_sync(self, request):
+        """Handle abort mission synchronously - waits for MAVSDK response before returning"""
+        # Validate state - abort can be called from more states than return_to_base
+        valid_abort_states = ['Mission in progress', 'Loiter', 'Pan']
+        current_state = self.state_machine.current_state.name
+        if current_state not in valid_abort_states:
+            self.get_logger().error(f'Cannot abort mission from state: {current_state}')
+            return False
+
+        self.current_mission_waypoints = request.waypoints
+        self.current_mission_id = request.drone_id
+
+        # Use threading event to wait for async response
+        success_event = threading.Event()
+        upload_success = [False]  # Use list to allow modification in nested function
+        error_message = ['']
+
+        def mavsdk_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info('MAVSDK abort mission successful. Returning to base!')
+                    self.mission_complete = False
+                    self.state_machine.return_to_launch()  # Same state transition as return_to_base
+                    upload_success[0] = True
+                else:
+                    self.get_logger().error(f'MAVSDK abort mission failed: {response.message}')
+                    error_message[0] = response.message
+                    # Clear the stored mission data on failure
+                    self.current_mission_waypoints = []
+                    self.current_mission_id = None
+
+            except Exception as e:
+                self.get_logger().error(f'MAVSDK abort mission service call failed: {str(e)}')
+                error_message[0] = str(e)
+                self.current_mission_waypoints = []
+                self.current_mission_id = None
+            finally:
+                success_event.set()  # Signal completion regardless of success/failure
+
+        try:
+            mavsdk_request = Return.Request()
+            mavsdk_request.waypoints = request.waypoints
+
+            future = self.mavsdk_abort_mission_client.call_async(mavsdk_request)
+            future.add_done_callback(mavsdk_callback)
+
+            self.get_logger().info('Abort mission forwarded to MAVSDK node - waiting for response...')
+        
+            # Wait for the async call to complete (with timeout)
+            if success_event.wait(timeout=30.0):  # 30 second timeout
+                if upload_success[0]:
+                    return True
+                else:
+                    self.get_logger().error(f'Abort mission failed: {error_message[0]}')
+                    return False
+            else:
+                self.get_logger().error('Abort mission timed out!')
+                # Cancel the future if possible and clean up
+                if not future.done():
+                    future.cancel()
+                return False
+            
+        except Exception as e:
+            self.get_logger().error(f'Failed to initiate abort mission to MAVSDK: {str(e)}')
             return False
 
     def handle_landing_sequence(self):
