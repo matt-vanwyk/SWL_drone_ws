@@ -14,6 +14,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/UploadMission.srv"
   "srv/SetYaw.srv"
   "srv/Land.srv"
+  "srv/Return.srv"
   DEPENDENCIES std_msgs swl_shared_interfaces
 )
 ament_export_dependencies(rosidl_default_runtime)

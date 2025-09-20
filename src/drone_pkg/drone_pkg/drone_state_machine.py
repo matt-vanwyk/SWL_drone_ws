@@ -7,7 +7,7 @@ from concurrent.futures import Future as ConcurrentFuture
 from swl_shared_interfaces.srv import DroneCommand
 from swl_shared_interfaces.msg import DroneState, BaseState
 from swl_drone_interfaces.msg import Telemetry
-from swl_drone_interfaces.srv import UploadMission, SetYaw, Land
+from swl_drone_interfaces.srv import UploadMission, SetYaw, Land, Return
 from std_msgs.msg import Header
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
@@ -58,6 +58,7 @@ class DroneStateMachine(StateMachine):
     def on_enter_RTL(self):
         """Called when returning to launch"""
         self.model.get_logger().info("State change: MISSION_PROGRESS -> RTL")
+        self.model.rtl_start_time = time.time()
 
     def on_enter_Loiter(self):
         """Called when drone reaches home and enters loiter"""
@@ -104,6 +105,13 @@ class DroneStateMachineNode(Node):
         self.mavsdk_yaw_client = self.create_client(
             SetYaw,
             'drone/set_yaw',
+            callback_group=self.client_callback_group
+        )
+
+        # Service client for mavsdk_node Return.srv
+        self.mavsdk_return_to_base_client = self.create_client(
+            Return,
+            'drone/return',
             callback_group=self.client_callback_group
         )
 
@@ -250,15 +258,21 @@ class DroneStateMachineNode(Node):
         
         # RTL -> Loiter: Mission complete AND in HOLD mode (reached home)
         elif self.state_machine.current_state.name == 'Rtl':
-            if self.mission_complete and str(self.flight_mode) == "HOLD":
-                self.get_logger().info('RTL mission complete - drone has reached home and is in HOLD mode')
-                self.state_machine.reached_home()
-        
-        # Loiter -> Landing: Manual landing command or low battery (future implementation)
-        elif current_state == 'Loiter':
-            # For now, landing will be triggered by manual command
-            # Future: Could add automatic landing on low battery
-            pass
+            # Only check transition if we've been in RTL state for sufficient time
+            # and the mission is actually complete (not just from previous mission)
+            if hasattr(self, 'rtl_start_time'):
+                time_in_rtl = time.time() - self.rtl_start_time
+                
+                if (time_in_rtl > 5.0 and  # Been in RTL for at least 5 seconds
+                    self.mission_complete and 
+                    str(self.flight_mode) == "HOLD"):  # RTL missions should disarm when complete
+                    
+                    self.get_logger().info('RTL mission complete - drone has reached home and is disarmed')
+                    self.state_machine.reached_home()
+                    delattr(self, 'rtl_start_time')  # Clean up
+            else:
+                # This shouldn't happen, but just in case
+                self.get_logger().warn('In RTL state but no start time recorded')
         
         # Landing -> Landed: On ground and disarmed
         elif current_state == 'Landing':
@@ -480,13 +494,13 @@ class DroneStateMachineNode(Node):
         
         # Validate state (should be Mission_In_Progress or related)
         current_state = self.state_machine.current_state.name
-        if current_state not in ['Mission in progress', 'Loiter', 'Pan']:
+        if current_state != 'Mission in progress':
             self.get_logger().error(f'Cannot return to base from state: {current_state}')
             return False
         
         # Store RTL mission data
         self.current_mission_waypoints = request.waypoints
-        self.current_mission_id = f"RTL_{request.drone_id}"
+        self.current_mission_id = request.drone_id
         
         # Use threading event to wait for async response
         success_event = threading.Event()
@@ -518,11 +532,11 @@ class DroneStateMachineNode(Node):
 
         try:
             # Create MAVSDK upload request
-            mavsdk_request = UploadMission.Request()
+            mavsdk_request = Return.Request()
             mavsdk_request.waypoints = request.waypoints
             
             # Make the async service call
-            future = self.mavsdk_upload_mission_client.call_async(mavsdk_request)
+            future = self.mavsdk_return_to_base_client.call_async(mavsdk_request)
             future.add_done_callback(mavsdk_callback)
             
             self.get_logger().info('RTL mission forwarded to MAVSDK node - waiting for response...')
@@ -539,8 +553,6 @@ class DroneStateMachineNode(Node):
                 # Cancel the future if possible and clean up
                 if not future.done():
                     future.cancel()
-                self.current_mission_waypoints = []
-                self.current_mission_id = None
                 return False
                 
         except Exception as e:

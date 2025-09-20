@@ -1,0 +1,6 @@
+# swl_drone_interfaces/srv/Return.srv
+
+swl_shared_interfaces/Waypoint[] waypoints
+---
+bool success
+string message

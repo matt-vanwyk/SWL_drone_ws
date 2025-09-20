@@ -8,7 +8,7 @@ from rclpy.node import Node
 from mavsdk import System
 from mavsdk.mission import MissionItem, MissionPlan
 from mavsdk.telemetry import FlightMode
-from swl_drone_interfaces.srv import UploadMission, SetYaw, Land # Reroute, Return
+from swl_drone_interfaces.srv import UploadMission, SetYaw, Land, Return # Reroute
 from swl_drone_interfaces.msg import Telemetry
 
 async def spin(node: Node):
@@ -42,6 +42,12 @@ class MAVSDKNode(Node):
             SetYaw,
             'drone/set_yaw',
             self.handle_set_yaw
+        )
+
+        self.return_server = self.create_service(
+            Return,
+            'drone/return',
+            self.handle_return
         )
 
         self.land_server = self.create_service(
@@ -337,6 +343,53 @@ class MAVSDKNode(Node):
                 
             return {"success": False, "message": f"Error: {str(e)}"}
 
+    def handle_return(self, request, response):
+        future = asyncio.run_coroutine_threadsafe(self.do_return(request), self.loop)
+        result = future.result()
+        response.success = result['success']
+        response.message = result['message']
+        return response
+
+    async def do_return(self, request):
+        try:
+            self.get_logger().info("Creating Mission")
+            mission_items = []
+            for wp in request.waypoints:
+                mission_items.append(MissionItem(
+                    wp.latitude,
+                    wp.longitude,
+                    wp.altitude,
+                    wp.speed,
+                    True,  # is_fly_through
+                    float('nan'),  # gimbal_pitch_deg
+                    float('nan'),  # gimbal_yaw_deg
+                    MissionItem.CameraAction.NONE,
+                    float('nan'),  # loiter_time_s
+                    float('nan'),  # camera_photo_interval_s
+                    float('nan'),  # acceptance_radius_m
+                    float('nan'),  # yaw_deg
+                    float('nan'),   # camera_photo_distance_m
+                    MissionItem.VehicleAction.NONE
+                ))
+
+            ### TODO: Go into hold mode before returning
+            self.get_logger().info("Going into hold mode")
+            await self.drone.action.hold()
+            self.get_logger().info("Hold mode activated")
+
+            mission_plan = MissionPlan(mission_items)
+            await self.drone.mission.clear_mission()
+            self.get_logger().info("Mission Cleared")
+            await self.drone.mission.upload_mission(mission_plan)
+            self.get_logger().info("Return mission uploaded successfully")
+
+            await self.drone.mission.start_mission()
+            self.get_logger().info("Return Mission Started")
+
+            return {"success": True, "message": "Return mission uploaded and flight mode set to MISSION"}
+        except Exception as e:
+            return {"success": False, "message": f"Error: {str(e)}"}
+
     def handle_land(self, request, response):
         """Handle landing command using MAVSDK return_to_launch action"""
         future = asyncio.run_coroutine_threadsafe(self.execute_landing(request), self.loop)
@@ -351,7 +404,7 @@ class MAVSDKNode(Node):
             self.get_logger().info("Initiating drone landing using RTL action...")
             
             # Use return_to_launch action which will land the drone at current position
-            await self.drone.action.return_to_launch()
+            await self.drone.action.land()
             
             self.get_logger().info("Landing command executed successfully")
             return {"success": True, "message": "Landing initiated"}
