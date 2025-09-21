@@ -108,6 +108,13 @@ class DroneStateMachineNode(Node):
             callback_group=self.client_callback_group
         )
 
+        # Service client for mavsdk_node Return.srv (but this is the client for reroute_mission command type)
+        self.mavsdk_reroute_mission_client = self.create_client(
+            UploadMission,
+            'drone/reroute_mission',
+            callback_group=self.client_callback_group
+        )
+
         # Service client for mavsdk_node Return.srv
         self.mavsdk_return_to_base_client = self.create_client(
             Return,
@@ -390,6 +397,8 @@ class DroneStateMachineNode(Node):
             response.success = self.handle_return_to_base_sync(request)
         elif request.command_type == 'abort_mission':
             response.success = self.handle_abort_mission_sync(request)
+        elif request.command_type == 'reroute_mission':
+            response.success = self.handle_reroute_mission_sync(request)
         else:
             response.success = False
             self.get_logger().warn(f'Unknown drone command: {request.command_type}')
@@ -497,6 +506,71 @@ class DroneStateMachineNode(Node):
         future.add_done_callback(pan_mavsdk_callback)
 
         return True
+
+    def handle_reroute_mission_sync(self, request):
+        """Handle reroute mission synchronously - waits for MAVSDK response before returning"""
+    
+        # Validate state - reroute should only work during mission
+        current_state = self.state_machine.current_state.name
+        if current_state != 'Mission in progress':
+            self.get_logger().error(f'Cannot reroute mission from state: {current_state}')
+            return False
+        
+        # Store new mission data
+        self.current_mission_waypoints = request.waypoints
+        self.current_mission_id = request.drone_id
+        
+        # Use threading event to wait for async response
+        success_event = threading.Event()
+        upload_success = [False]
+        error_message = ['']
+
+        def mavsdk_callback(future: Future):
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info('MAVSDK reroute mission successful. Following new route!')
+                    upload_success[0] = True
+                else:
+                    self.get_logger().error(f'MAVSDK reroute mission failed: {response.message}')
+                    error_message[0] = response.message
+                    # Clear the stored mission data on failure
+                    self.current_mission_waypoints = []
+                    self.current_mission_id = None
+
+            except Exception as e:
+                self.get_logger().error(f'MAVSDK reroute mission service call failed: {str(e)}')
+                error_message[0] = str(e)
+                self.current_mission_waypoints = []
+                self.current_mission_id = None
+            finally:
+                success_event.set()
+        
+        try:
+            mavsdk_request = UploadMission.Request()
+            mavsdk_request.waypoints = request.waypoints
+
+            future = self.mavsdk_reroute_mission_client.call_async(mavsdk_request)
+            future.add_done_callback(mavsdk_callback)
+
+            self.get_logger().info('Reroute mission forwarded to MAVSDK node - waiting for response...')
+        
+            # Wait for the async call to complete (with timeout)
+            if success_event.wait(timeout=30.0):
+                if upload_success[0]:
+                    return True
+                else:
+                    self.get_logger().error(f'Reroute mission failed: {error_message[0]}')
+                    return False
+            else:
+                self.get_logger().error('Reroute mission timed out!')
+                if not future.done():
+                    future.cancel()
+                return False
+                
+        except Exception as e:
+            self.get_logger().error(f'Failed to initiate reroute mission to MAVSDK: {str(e)}')
+            return False
 
     def handle_return_to_base_sync(self, request):
         """Handle return to base synchronously - waits for MAVSDK response before returning"""
