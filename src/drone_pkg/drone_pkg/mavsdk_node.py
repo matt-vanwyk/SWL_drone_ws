@@ -4,12 +4,16 @@ import time
 import asyncio
 import threading
 import rclpy
+import base64
 from rclpy.node import Node
 from mavsdk import System
 from mavsdk.mission import MissionItem, MissionPlan
 from mavsdk.telemetry import FlightMode
+from mavsdk.rtk import RtcmData
 from swl_drone_interfaces.srv import UploadMission, SetYaw, Land, Return # Reroute
 from swl_drone_interfaces.msg import Telemetry
+from std_msgs.msg import UInt8MultiArray
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 async def spin(node: Node):
     def _spin_func():
@@ -75,6 +79,14 @@ class MAVSDKNode(Node):
             10
         )
 
+        qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.rtcm_subscriber = self.create_subscription(
+            UInt8MultiArray,
+            'rtcm/frames',
+            self.rtcm_corrections_callback,
+            qos
+        )
+
         # Create variables to store telemetry data
         self.position = None
         self.armed = False
@@ -86,6 +98,7 @@ class MAVSDKNode(Node):
         self.velocity = None
         self.mission_complete = False
         self.heading = None
+        self.gps_fix_type = None 
         
         self.loop = asyncio.get_event_loop()
 
@@ -106,6 +119,7 @@ class MAVSDKNode(Node):
         self.loop.create_task(self.update_velocity())
         self.loop.create_task(self.update_mission_progress())
         self.loop.create_task(self.update_drone_heading())
+        self.loop.create_task(self.update_gps_info())
         
         await asyncio.sleep(1)
         # Create timers for publishers
@@ -172,7 +186,25 @@ class MAVSDKNode(Node):
                 # await asyncio.sleep(0.1)  # Small delay to prevent tight loop
         except Exception as e:
             self.get_logger().error(f"Error in num_satellites status update: {str(e)}")   
-            
+
+    async def update_gps_info(self):
+        """Track GPS fix type and satellite count; log on fix transitions."""
+        last_fix = None
+        try:
+            async for info in self.drone.telemetry.gps_info():
+                # info has: fix_type, num_satellites
+                self.gps_fix_type = info.fix_type
+                self.num_satellites = info  # keep your existing usage in publish_telemetry
+
+                if info.fix_type != last_fix:
+                    self.get_logger().info(
+                        f"GPS fix: {info.fix_type}, sats={info.num_satellites}"
+                    )
+                    last_fix = info.fix_type
+                # no sleep needed; this is an async generator
+        except Exception as e:
+            self.get_logger().error(f"Error in GPS info update: {str(e)}")
+ 
     async def update_landed_state(self):
         try:
             async for landed in self.drone.telemetry.landed_state():
@@ -555,6 +587,29 @@ class MAVSDKNode(Node):
         except Exception as e:
             self.get_logger().error(f"Landing failed: {str(e)}")
             return {"success": False, "message": f"Error: {str(e)}"}
+    
+    def rtcm_corrections_callback(self, msg: UInt8MultiArray):
+        # Convert list[int] -> bytes
+        frame_bytes = bytes(msg.data)
+        #self.get_logger().info(f"RTCM chunk received: {len(frame_bytes)} bytes")
+        # Base64 encode for MAVSDK 3.x
+        b64 = base64.b64encode(frame_bytes).decode('utf-8')
+        # Run async call in the node's event loop
+        fut = asyncio.run_coroutine_threadsafe(
+            self._send_rtcm(RtcmData(b64)),
+            self.loop
+        )
+        # Optional: catch/log errors
+        try:
+            fut.result(timeout=0.5)
+        except Exception as e:
+            self.get_logger().warn(f"RTCM send failed: {e}")
+
+    async def _send_rtcm(self, rtcm: RtcmData):
+        try:
+            await self.drone.rtk.send_rtcm_data(rtcm)
+        except Exception as e:
+            self.get_logger().error(f"MAVSDK send_rtcm_data error: {e}")
 
 ################################################
 #END - HANDLER FUNCTIONS FOR SERVICE REQUESTS FROM DRONE STATE MACHINE AND ASSOCIATED ASYNC MAVSDK FUNCTIONS 
