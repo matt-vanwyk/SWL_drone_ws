@@ -591,7 +591,7 @@ class MAVSDKNode(Node):
     def rtcm_corrections_callback(self, msg: UInt8MultiArray):
         # Convert list[int] -> bytes
         frame_bytes = bytes(msg.data)
-        #self.get_logger().info(f"RTCM chunk received: {len(frame_bytes)} bytes")
+        self.get_logger().info(f"RTCM chunk received: {len(frame_bytes)} bytes")
         # Base64 encode for MAVSDK 3.x
         b64 = base64.b64encode(frame_bytes).decode('utf-8')
         # Run async call in the node's event loop
