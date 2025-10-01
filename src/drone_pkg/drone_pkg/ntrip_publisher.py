@@ -17,9 +17,12 @@ class NtripPublisher(Node):
         self.declare_parameter('port', 2101)
         self.declare_parameter('https', 0)                 # 0=http, 1=https
         self.declare_parameter('datatype', 'RTCM')
-        self.declare_parameter('mountpoint', 'Spiderweb')
-        self.declare_parameter('user', 's224482378-at-mandela.ac.za')
-        self.declare_parameter('password', 'DSm2aDn2')
+        # self.declare_parameter('mountpoint', 'Spiderweb')
+        # self.declare_parameter('user', 's224482378-at-mandela.ac.za')
+        # self.declare_parameter('password', 'DSm2aDn2')
+        self.declare_parameter('mountpoint', 'Renewables')
+        self.declare_parameter('user', 's229701698-at-mandela.ac.za')
+        self.declare_parameter('password', 'mukandagumbo')
         # GGA control (usually not needed for RTK2go single-base)
         self.declare_parameter('ggainterval', -1)          # -1 none, 0 once, >0 sec
         self.declare_parameter('ggamode', 1)               # 1=fixed ref coords
