@@ -128,7 +128,8 @@ class MAVSDKNode(Node):
     async def connect_to_drone(self):
         try:
             self.get_logger().info("Connecting to drone...")
-            await self.drone.connect(system_address="udp://:14550")  # Connect to PX4 SITL
+            # await self.drone.connect(system_address="udp://:14550")  # Connect to SITL
+            await self.drone.connect(system_address="serial:///dev/drone:115200")  # Connect to Actual FLight Controller
             self.get_logger().info("Drone connected.")
         except Exception as e:
             self.get_logger().error(f"Error during connection and initialization: {str(e)}")

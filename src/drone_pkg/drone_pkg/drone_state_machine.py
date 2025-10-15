@@ -245,7 +245,7 @@ class DroneStateMachineNode(Node):
         
         # Idle -> Ready_To_Fly: Good battery and GPS lock
         if current_state == 'Idle':
-            if (self.battery_percentage > 90.0 and 
+            if (#self.battery_percentage > 90.0 and 
                 self.num_satellites >= 6 and 
                 not self.is_armed and 
                 self.landed_state == "ON_GROUND"):
