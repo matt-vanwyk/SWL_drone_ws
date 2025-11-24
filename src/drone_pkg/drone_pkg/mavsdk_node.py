@@ -128,8 +128,8 @@ class MAVSDKNode(Node):
     async def connect_to_drone(self):
         try:
             self.get_logger().info("Connecting to drone...")
-            # await self.drone.connect(system_address="udp://:14550")  # Connect to SITL
-            await self.drone.connect(system_address="serial:///dev/drone:115200")  # Connect to Actual FLight Controller
+            await self.drone.connect(system_address="udp://:14550")  # Connect to SITL
+            # await self.drone.connect(system_address="serial:///dev/drone:115200")  # Connect to Actual FLight Controller
             self.get_logger().info("Drone connected.")
         except Exception as e:
             self.get_logger().error(f"Error during connection and initialization: {str(e)}")
@@ -397,17 +397,44 @@ class MAVSDKNode(Node):
         return response
 
     async def execute_reroute_mission(self, request):
-        """Execute reroute mission sequence using MAVSDK"""
+        """Execute reroute mission sequence with state verification"""
         try:
             self.get_logger().info("Starting reroute mission sequence...")
             
             # Step 1: Pause current mission
             self.get_logger().info("Pausing current mission...")
             await self.drone.mission.pause_mission()
+            await asyncio.sleep(0.5)
             self.get_logger().info("Mission paused")
-
-            # Step 2: Create mission items for base coordinates
-            self.get_logger().info("Creating new mission with reroute waypoints..")
+            
+            # Step 2: Put drone in hold mode
+            self.get_logger().info("Activating hold mode...")
+            await self.drone.action.hold()
+            
+            # Step 3: CRITICAL - Wait for HOLD mode to actually activate
+            self.get_logger().info("Waiting for HOLD mode confirmation...")
+            hold_confirmed = False
+            for _ in range(50):  # Try for 5 seconds (50 * 0.1s)
+                if str(self.flight_mode) == "HOLD":
+                    hold_confirmed = True
+                    self.get_logger().info("✓ HOLD mode confirmed")
+                    break
+                await asyncio.sleep(0.1)
+            
+            if not hold_confirmed:
+                raise Exception(f"Failed to enter HOLD mode, current mode: {self.flight_mode}")
+            
+            # Additional stabilization time
+            await asyncio.sleep(0.5)
+            
+            # Step 4: Clear current mission
+            self.get_logger().info("Clearing current mission...")
+            await self.drone.mission.clear_mission()
+            self.get_logger().info("Mission cleared")
+            await asyncio.sleep(1.0)  # Wait for clear to propagate to flight controller
+            
+            # Step 5: Create new mission items
+            self.get_logger().info("Creating new mission with reroute waypoints...")
             mission_items = []
             for wp in request.waypoints:
                 mission_items.append(MissionItem(
@@ -415,42 +442,34 @@ class MAVSDKNode(Node):
                     wp.longitude,
                     wp.altitude,
                     wp.speed,
-                    True,  # is_fly_through
-                    float('nan'),  # gimbal_pitch_deg
-                    float('nan'),  # gimbal_yaw_deg
+                    True,
+                    float('nan'),
+                    float('nan'),
                     MissionItem.CameraAction.NONE,
-                    float('nan'),  # loiter_time_s
-                    float('nan'),  # camera_photo_interval_s
-                    float('nan'),  # acceptance_radius_m
-                    float('nan'),  # yaw_deg
-                    float('nan'),   # camera_photo_distance_m
+                    float('nan'),
+                    float('nan'),
+                    float('nan'),
+                    float('nan'),
+                    float('nan'),
                     MissionItem.VehicleAction.NONE
                 ))
             
-            # Step 2: Put drone in hold mode
-            self.get_logger().info("Activating hold mode...")
-            await self.drone.action.hold()
-            self.get_logger().info("Hold mode activated")
-
-            # Step 3: Upload new mission (base coordinates)
+            # Step 6: Upload new mission
             mission_plan = MissionPlan(mission_items)
-            
-            # Step 4: Clear current mission
-            self.get_logger().info("Clearing current mission...")
-            await self.drone.mission.clear_mission()
-            self.get_logger().info("Mission cleared")
-
             await self.drone.mission.upload_mission(mission_plan)
             self.get_logger().info("Reroute mission uploaded successfully")
+            await asyncio.sleep(0.5)  # Give upload time to complete
             
-            # Step 6: Start the abort mission
+            # Step 7: Start the new mission
+            self.get_logger().info("Starting reroute mission...")
             await self.drone.mission.start_mission()
-            self.get_logger().info("Reroute mission started - following new route")
-
+            self.get_logger().info("✓ Reroute mission started - following new route")
+            
             return {"success": True, "message": "Reroute mission completed - drone following new waypoints"}
             
         except Exception as e:
-            self.get_logger().error(f"Reroute mission failed: {str(e)}")
+            self.get_logger().error(f"❌ Reroute mission failed: {str(e)}")
+            self.get_logger().error(f"Current flight mode: {self.flight_mode}")
             return {"success": False, "message": f"Error: {str(e)}"}
 
     def handle_return(self, request, response):
@@ -509,16 +528,36 @@ class MAVSDKNode(Node):
         return response
 
     async def execute_abort_mission(self, request):
-        """Execute abort mission sequence using MAVSDK"""
+        """Execute abort mission sequence with state verification"""
         try:
             self.get_logger().info("Starting abort mission sequence...")
             
             # Step 1: Pause current mission
             self.get_logger().info("Pausing current mission...")
             await self.drone.mission.pause_mission()
+            await asyncio.sleep(0.5)
             self.get_logger().info("Mission paused")
-
-            # Step 2: Create mission items for base coordinates
+            
+            # Step 2: Put drone in hold mode
+            self.get_logger().info("Activating hold mode...")
+            await self.drone.action.hold()
+            
+            # Step 3: Wait for HOLD confirmation
+            self.get_logger().info("Waiting for HOLD mode confirmation...")
+            hold_confirmed = False
+            for _ in range(50):
+                if str(self.flight_mode) == "HOLD":
+                    hold_confirmed = True
+                    self.get_logger().info("✓ HOLD mode confirmed")
+                    break
+                await asyncio.sleep(0.1)
+            
+            if not hold_confirmed:
+                raise Exception(f"Failed to enter HOLD mode, current: {self.flight_mode}")
+            
+            await asyncio.sleep(0.5)
+            
+            # Step 4: Create abort mission
             self.get_logger().info("Creating abort mission to base coordinates...")
             mission_items = []
             for wp in request.waypoints:
@@ -527,42 +566,38 @@ class MAVSDKNode(Node):
                     wp.longitude,
                     wp.altitude,
                     wp.speed,
-                    True,  # is_fly_through
-                    float('nan'),  # gimbal_pitch_deg
-                    float('nan'),  # gimbal_yaw_deg
+                    True,
+                    float('nan'),
+                    float('nan'),
                     MissionItem.CameraAction.NONE,
-                    float('nan'),  # loiter_time_s
-                    float('nan'),  # camera_photo_interval_s
-                    float('nan'),  # acceptance_radius_m
-                    float('nan'),  # yaw_deg
-                    float('nan'),   # camera_photo_distance_m
+                    float('nan'),
+                    float('nan'),
+                    float('nan'),
+                    float('nan'),
+                    float('nan'),
                     MissionItem.VehicleAction.NONE
                 ))
             
-            # Step 2: Put drone in hold mode
-            self.get_logger().info("Activating hold mode...")
-            await self.drone.action.hold()
-            self.get_logger().info("Hold mode activated")
-
-            # Step 3: Upload new mission (base coordinates)
+            # Step 5: Clear, upload, start
             mission_plan = MissionPlan(mission_items)
             
-            # Step 4: Clear current mission
             self.get_logger().info("Clearing current mission...")
             await self.drone.mission.clear_mission()
             self.get_logger().info("Mission cleared")
-
-            await self.drone.mission.upload_mission(mission_plan)
-            self.get_logger().info("Abort mission uploaded successfully")
+            await asyncio.sleep(1.0)
             
-            # Step 6: Start the abort mission
+            await self.drone.mission.upload_mission(mission_plan)
+            self.get_logger().info("Abort mission uploaded")
+            await asyncio.sleep(0.5)
+            
             await self.drone.mission.start_mission()
-            self.get_logger().info("Abort mission started - returning to base")
-
-            return {"success": True, "message": "Abort mission completed - drone returning to base coordinates"}
+            self.get_logger().info("✓ Abort mission started - returning to base")
+            
+            return {"success": True, "message": "Abort mission completed - drone returning to base"}
             
         except Exception as e:
-            self.get_logger().error(f"Abort mission failed: {str(e)}")
+            self.get_logger().error(f"❌ Abort mission failed: {str(e)}")
+            self.get_logger().error(f"Current flight mode: {self.flight_mode}")
             return {"success": False, "message": f"Error: {str(e)}"}
             
     def handle_land(self, request, response):
