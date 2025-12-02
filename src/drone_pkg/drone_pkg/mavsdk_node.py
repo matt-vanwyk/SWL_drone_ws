@@ -11,7 +11,7 @@ from mavsdk.mission import MissionItem, MissionPlan
 from mavsdk.telemetry import FlightMode
 from mavsdk.rtk import RtcmData
 from .gimbal_controller import GimbalController
-from swl_drone_interfaces.srv import UploadMission, SetYaw, Land, Return # Reroute
+from swl_drone_interfaces.srv import UploadMission, SetYaw, SetPitch, Land, Return # Reroute
 from swl_drone_interfaces.msg import Telemetry
 from std_msgs.msg import UInt8MultiArray
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -48,6 +48,12 @@ class MAVSDKNode(Node):
             SetYaw,
             'drone/set_yaw',
             self.handle_set_yaw
+        )
+
+        self.set_tilt_server = self.create_service(
+            SetPitch,
+            'drone/set_tilt',
+            self.handle_set_tilt
         )
 
         self.reroute_mission_server = self.create_service(
@@ -388,6 +394,62 @@ class MAVSDKNode(Node):
             
         except Exception as e:
             self.get_logger().error(f"Gimbal yaw control failed: {str(e)}")
+            return {"success": False, "message": f"Error: {str(e)}"}
+
+    def handle_set_tilt(self, request, response):
+        """Handle yaw/pan command"""
+        future = asyncio.run_coroutine_threadsafe(self.set_tilt(request), self.loop)
+        result = future.result()
+        response.success = result['success']
+        response.message = result['message']
+        return response
+
+
+    async def set_tilt(self, request):
+        """Tilt the gimbal up/down using relative movement"""
+        try:
+            # Validate request
+            if request.pitch_degrees < 0 or request.pitch_degrees > 180:
+                return {"success": False, "message": f"Invalid tilt angle: {request.pitch_degrees}. Must be 0-180°"}
+            
+            # Calculate relative pan amount
+            # yaw_cw = True means pan right (positive), False means pan left (negative)
+            if request.tilt_cw:
+                delta_tilt = request.pitch_degrees  # Pan right
+            else:
+                delta_tilt = -request.pitch_degrees  # Pan left
+            
+            self.get_logger().info(
+                f"Tilting gimbal {abs(delta_tilt):.1f}° {'up' if delta_tilt > 0 else 'down'} "
+                f"(current: {self.gimbal.current_pitch:.1f}°)"
+            )
+            
+            # Pan using relative movement
+            success, new_angle, clamped = await self.gimbal.tilt_relative(delta_tilt)
+            
+            if clamped:
+                self.get_logger().warn(
+                    f"Gimbal hit {'up' if delta_tilt > 0 else 'down'} limit! "
+                    f"Stopped at {new_angle:.1f}°"
+                )
+                return {
+                    "success": True, 
+                    "message": f"Gimbal at limit: {new_angle:.1f}° (requested {delta_tilt:+.1f}° more)"
+                }
+            
+            self.get_logger().info(f"Gimbal tilted successfully to {new_angle:.1f}°")
+            
+            # Get remaining range for info
+            remaining = self.gimbal.get_remaining_range()
+            self.get_logger().debug(
+                f"Remaining range - Up: {remaining['tilt_up_remaining']:.1f}°, "
+                f"Down: {remaining['tilt_down_remaining']:.1f}°"
+            )
+            
+            return {"success": True, "message": f"Gimbal at {new_angle:.1f}°"}
+            
+        except Exception as e:
+            self.get_logger().error(f"Gimbal tilt control failed: {str(e)}")
             return {"success": False, "message": f"Error: {str(e)}"}
 
     # async def set_yaw(self, request):

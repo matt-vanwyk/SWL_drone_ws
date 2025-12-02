@@ -1,0 +1,7 @@
+# swl_drone_interfaces/srv/SetYaw.srv
+
+bool tilt_cw
+float64 pitch_degrees
+---
+bool success
+string message

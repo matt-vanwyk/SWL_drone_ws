@@ -7,7 +7,7 @@ from concurrent.futures import Future as ConcurrentFuture
 from swl_shared_interfaces.srv import DroneCommand
 from swl_shared_interfaces.msg import DroneState, BaseState
 from swl_drone_interfaces.msg import Telemetry
-from swl_drone_interfaces.srv import UploadMission, SetYaw, Land, Return
+from swl_drone_interfaces.srv import UploadMission, SetYaw, SetPitch, Land, Return
 from std_msgs.msg import Header
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
@@ -105,6 +105,13 @@ class DroneStateMachineNode(Node):
         self.mavsdk_yaw_client = self.create_client(
             SetYaw,
             'drone/set_yaw',
+            callback_group=self.client_callback_group
+        )
+
+        # Service client for mavsdk_node SetPitch.srv
+        self.mavsdk_tilt_client = self.create_client(
+            SetPitch,
+            'drone/set_tilt',
             callback_group=self.client_callback_group
         )
 
@@ -393,6 +400,8 @@ class DroneStateMachineNode(Node):
             response.success = self.handle_mission_upload_sync(request)
         elif request.command_type == 'pan':
             response.success = self.handle_pan(request)
+        elif request.command_type == 'tilt':
+            response.success = self.handle_tilt(request)
         elif request.command_type == 'return_to_base':
             response.success = self.handle_return_to_base_sync(request)
         elif request.command_type == 'abort_mission':
@@ -504,6 +513,34 @@ class DroneStateMachineNode(Node):
 
         future = self.mavsdk_yaw_client.call_async(pan_request)
         future.add_done_callback(pan_mavsdk_callback)
+
+        return True
+
+    def handle_tilt(self, request):
+        """Flexible tilt control with exact degrees"""
+
+        tilt_clockwise = request.pitch_degrees > 0
+        tilt_degrees = abs(request.pitch_degrees)
+
+        self.get_logger().info(f'Sending pan: {tilt_degrees:.1f}° {"clockwise" if tilt_clockwise else "counter-clockwise"}')
+
+        tilt_request = SetPitch.Request()
+        tilt_request.tilt_cw = tilt_clockwise
+        tilt_request.pitch_degrees = tilt_degrees
+
+        def tilt_mavsdk_callback(future):
+            try:
+                response = future.result()
+                if response.success:
+                    direction = "up" if tilt_clockwise else "down"
+                    self.get_logger().info(f'MAVSDK tilt executed: {pitch_degrees:.1f}° {direction}')
+                else:
+                    self.get_logger().warn(f'MAVSDK tilt failed: {response.message}')
+            except Exception as e:
+                self.get_logger().error(f'MAVSDK tilt service failed: {str(e)}')
+
+        future = self.mavsdk_tilt_client.call_async(tilt_request)
+        future.add_done_callback(tilt_mavsdk_callback)
 
         return True
 

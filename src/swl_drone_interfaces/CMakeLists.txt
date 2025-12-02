@@ -13,6 +13,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Telemetry.msg"
   "srv/UploadMission.srv"
   "srv/SetYaw.srv"
+  "srv/SetPitch.srv"
   "srv/Land.srv"
   "srv/Return.srv"
   DEPENDENCIES std_msgs swl_shared_interfaces
