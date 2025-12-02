@@ -10,6 +10,7 @@ from mavsdk import System
 from mavsdk.mission import MissionItem, MissionPlan
 from mavsdk.telemetry import FlightMode
 from mavsdk.rtk import RtcmData
+from .gimbal_controller import GimbalController
 from swl_drone_interfaces.srv import UploadMission, SetYaw, Land, Return # Reroute
 from swl_drone_interfaces.msg import Telemetry
 from std_msgs.msg import UInt8MultiArray
@@ -34,6 +35,7 @@ class MAVSDKNode(Node):
     def __init__(self):
         super().__init__('mavsdk_node')
         self.drone = System()
+        self.gimbal = None
 
         # Services for drone state machine clients
         self.upload_mission_server = self.create_service(
@@ -107,6 +109,18 @@ class MAVSDKNode(Node):
 ################################################
     async def start(self):
         await self.connect_to_drone()
+
+        self.gimbal = GimbalController(self.drone)
+        self.get_logger().info("Gimbal controller initialized")
+
+        try:
+            self.get_logger().info("Homing gimbal to center position...")
+            await self.gimbal.center()
+            await asyncio.sleep(1)  # Give gimbal time to move
+            self.get_logger().info("✓ Gimbal homed successfully")
+        except Exception as e:
+            self.get_logger().error(f"Failed to home gimbal: {e}")
+            self.get_logger().warn("Continuing without gimbal homing...")
         
         # Start telemetry updates in separate tasks
         self.loop.create_task(self.update_position())
@@ -128,8 +142,8 @@ class MAVSDKNode(Node):
     async def connect_to_drone(self):
         try:
             self.get_logger().info("Connecting to drone...")
-            await self.drone.connect(system_address="udp://:14550")  # Connect to SITL
-            # await self.drone.connect(system_address="serial:///dev/drone:115200")  # Connect to Actual FLight Controller
+            # await self.drone.connect(system_address="udp://:14550")  # Connect to SITL
+            await self.drone.connect(system_address="serial:///dev/drone:115200")  # Connect to Actual Flight Controller
             self.get_logger().info("Drone connected.")
         except Exception as e:
             self.get_logger().error(f"Error during connection and initialization: {str(e)}")
@@ -144,7 +158,7 @@ class MAVSDKNode(Node):
                 self.position = position
                 # self.get_logger().info(f"Raw position data: {position}")
                 # self.get_logger().info(f"Latitude: {position.latitude_deg}, Longitude: {position.longitude_deg}, Relative Altitude: {position.relative_altitude_m}")
-                # await asyncio.sleep(0.1)  # Small delay to prevent tight loop
+                #await asyncio.sleep(0.1)  # Small delay to prevent tight loop
         except Exception as e:
             self.get_logger().error(f"Error in position update: {str(e)}")
             
@@ -328,65 +342,113 @@ class MAVSDKNode(Node):
         response.message = result['message']
         return response
 
+
     async def set_yaw(self, request):
-        """Execute yaw/pan with simple debugging and strategic waits"""
+        """Pan the gimbal left/right using relative movement"""
         try:
-            if str(self.flight_mode) != "HOLD":
-                return {"success": False, "message": f"Unsafe mode: {self.flight_mode}"}
+            # Validate request
+            if request.yaw_degrees < 0 or request.yaw_degrees > 180:
+                return {"success": False, "message": f"Invalid yaw angle: {request.yaw_degrees}. Must be 0-180°"}
             
-            # Debug 2: Get current position and heading
-            current_position = await self.drone.telemetry.position().__anext__()
-            current_heading = await self.drone.telemetry.heading().__anext__()
-            current_yaw = current_heading.heading_deg
-            
-            # Calculate target yaw
+            # Calculate relative pan amount
+            # yaw_cw = True means pan right (positive), False means pan left (negative)
             if request.yaw_cw:
-                target_yaw = (current_yaw + request.yaw_degrees) % 360
+                delta_yaw = -request.yaw_degrees  # Pan right
             else:
-                target_yaw = (current_yaw - request.yaw_degrees) % 360
+                delta_yaw = request.yaw_degrees  # Pan left
             
-            # Create mission item
-            mission_items = [MissionItem(
-                current_position.latitude_deg,
-                current_position.longitude_deg,
-                current_position.relative_altitude_m,
-                0,
-                True,
-                float('nan'), 
-                float('nan'),
-                MissionItem.CameraAction.NONE,
-                float('nan'),
-                float('nan'), 
-                float('nan'),
-                target_yaw,
-                float('nan'),
-                MissionItem.VehicleAction.NONE
-            )]
+            self.get_logger().info(
+                f"Panning gimbal {abs(delta_yaw):.1f}° {'right' if delta_yaw > 0 else 'left'} "
+                f"(current: {self.gimbal.current_yaw:.1f}°)"
+            )
             
-            mission_plan = MissionPlan(mission_items)
+            # Pan using relative movement
+            success, new_angle, clamped = await self.gimbal.pan_relative(delta_yaw)
             
-            await self.drone.mission.clear_mission()
-            await asyncio.sleep(1.0)
-            await self.drone.mission.upload_mission(mission_plan)
-            await self.drone.mission.set_return_to_launch_after_mission(False)
-            self.get_logger().info("Yaw mission uploaded successfully")
-            await asyncio.sleep(0.5)
-            await self.drone.mission.start_mission()
+            if clamped:
+                self.get_logger().warn(
+                    f"Gimbal hit {'right' if delta_yaw > 0 else 'left'} limit! "
+                    f"Stopped at {new_angle:.1f}°"
+                )
+                return {
+                    "success": True, 
+                    "message": f"Gimbal at limit: {new_angle:.1f}° (requested {delta_yaw:+.1f}° more)"
+                }
             
-            return {"success": True, "message": f"Yaw changed to {target_yaw:.1f}°"}
+            self.get_logger().info(f"Gimbal panned successfully to {new_angle:.1f}°")
+            
+            # Get remaining range for info
+            remaining = self.gimbal.get_remaining_range()
+            self.get_logger().debug(
+                f"Remaining range - Left: {remaining['yaw_left_remaining']:.1f}°, "
+                f"Right: {remaining['yaw_right_remaining']:.1f}°"
+            )
+            
+            return {"success": True, "message": f"Gimbal at {new_angle:.1f}°"}
             
         except Exception as e:
-            self.get_logger().error(f"YAW FAILED: {str(e)}")
-            self.get_logger().error(f"Exception type: {type(e).__name__}")
-            
-            # Debug the current state when we fail
-            try:
-                error_mode = await self.drone.telemetry.flight_mode().__anext__()
-                self.get_logger().error(f"Flight mode during error: {error_mode}")
-            except:
-                self.get_logger().error("Could not get flight mode during error")
-                
+            self.get_logger().error(f"Gimbal yaw control failed: {str(e)}")
             return {"success": False, "message": f"Error: {str(e)}"}
+
+    # async def set_yaw(self, request):
+    #     """Execute yaw/pan with simple debugging and strategic waits"""
+    #     try:
+    #         if str(self.flight_mode) != "HOLD":
+    #             return {"success": False, "message": f"Unsafe mode: {self.flight_mode}"}
+            
+    #         # Debug 2: Get current position and heading
+    #         current_position = await self.drone.telemetry.position().__anext__()
+    #         current_heading = await self.drone.telemetry.heading().__anext__()
+    #         current_yaw = current_heading.heading_deg
+            
+    #         # Calculate target yaw
+    #         if request.yaw_cw:
+    #             target_yaw = (current_yaw + request.yaw_degrees) % 360
+    #         else:
+    #             target_yaw = (current_yaw - request.yaw_degrees) % 360
+            
+    #         # Create mission item
+    #         mission_items = [MissionItem(
+    #             current_position.latitude_deg,
+    #             current_position.longitude_deg,
+    #             current_position.relative_altitude_m,
+    #             0,
+    #             True,
+    #             float('nan'), 
+    #             float('nan'),
+    #             MissionItem.CameraAction.NONE,
+    #             float('nan'),
+    #             float('nan'), 
+    #             float('nan'),
+    #             target_yaw,
+    #             float('nan'),
+    #             MissionItem.VehicleAction.NONE
+    #         )]
+            
+    #         mission_plan = MissionPlan(mission_items)
+            
+    #         await self.drone.mission.clear_mission()
+    #         await asyncio.sleep(1.0)
+    #         await self.drone.mission.upload_mission(mission_plan)
+    #         await self.drone.mission.set_return_to_launch_after_mission(False)
+    #         self.get_logger().info("Yaw mission uploaded successfully")
+    #         await asyncio.sleep(0.5)
+    #         await self.drone.mission.start_mission()
+            
+    #         return {"success": True, "message": f"Yaw changed to {target_yaw:.1f}°"}
+            
+    #     except Exception as e:
+    #         self.get_logger().error(f"YAW FAILED: {str(e)}")
+    #         self.get_logger().error(f"Exception type: {type(e).__name__}")
+            
+    #         # Debug the current state when we fail
+    #         try:
+    #             error_mode = await self.drone.telemetry.flight_mode().__anext__()
+    #             self.get_logger().error(f"Flight mode during error: {error_mode}")
+    #         except:
+    #             self.get_logger().error("Could not get flight mode during error")
+                
+    #         return {"success": False, "message": f"Error: {str(e)}"}
 
     def handle_reroute_mission(self, request, response):
         """Handle reroute mission command"""
