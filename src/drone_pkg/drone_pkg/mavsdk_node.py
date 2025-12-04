@@ -359,9 +359,9 @@ class MAVSDKNode(Node):
             # Calculate relative pan amount
             # yaw_cw = True means pan right (positive), False means pan left (negative)
             if request.yaw_cw:
-                delta_yaw = -request.yaw_degrees  # Pan right
-            else:
                 delta_yaw = request.yaw_degrees  # Pan left
+            else:
+                delta_yaw = -request.yaw_degrees  # Pan right
             
             self.get_logger().info(
                 f"Panning gimbal {abs(delta_yaw):.1f}° {'right' if delta_yaw > 0 else 'left'} "
