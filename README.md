@@ -82,27 +82,40 @@ Core package containing all drone control nodes and utilities.
 ```mermaid
 stateDiagram-v2
 
+  
+
 state "drone_pkg" as mission_group {
 
-drone_state_machine --> mavsdk_node: Services<br/>'drone/upload_mission'<br/>'drone/reroute_mission'<br/>'drone/set_yaw'<br/>'drone/return'<br/>'drone/abort_mission'<br/>'drone/land'<br/>'drone/set_tilt'
+drone_state_machine --> mavsdk_node: <u>Services</u><br/>'drone/upload_mission'<br/>'drone/reroute_mission'<br/>'drone/set_yaw'<br/>'drone/return'<br/>'drone/abort_mission'<br/>'drone/land'<br/>'drone/set_tilt'
+
+  
+  
 
 mavsdk_node--> PX4
 
-mavsdk_node--> drone_state_machine: Topics<br/>'drone/telemetry'
+  
 
-ntrip_publisher--> mavsdk_node: Topics<br/>'rtcm/frames'
+mavsdk_node--> drone_state_machine: <u>Topics</u><br/>'drone/telemetry'
+
+  
+
+ntrip_publisher--> mavsdk_node: <u>Topics</u><br/>'rtcm/frames'<br/>
 
 }
 
+  
+
 note left of drone_state_machine
-    base_state_machine
-    
-    Topics
-    'drone/state' (Publish)
-    'base/state' (Subscribe)
-    
-    Services
-    'drone/command'
+
+<u>base_state_machine</u>
+
+<u>Topics</u>
+'drone/state' (Publish)
+'base/state' (Subscribe)
+
+<u>Services</u>
+'drone/command' 
+
 end note
 ```
 
@@ -479,8 +492,8 @@ bool success
 
 ```bash
 # Clone with all submodules
-git clone --recursive https://github.com/your-org/Spiderweb_Labs_Genesis.git
-cd Spiderweb_Labs_Genesis/SWL_Drone_ws
+git clone --recursive https://github.com/Spiderweb-Lab-Engineers/SWL_Drone_ws.git
+cd SWL_Drone_ws
 ```
 
 ### 2. Install ROS2 Dependencies
@@ -489,8 +502,6 @@ cd Spiderweb_Labs_Genesis/SWL_Drone_ws
 # Update package list
 sudo apt update
 
-# Install required ROS2 packages
-sudo apt install python3-colcon-common-extensions
 
 # Install Python dependencies
 pip install mavsdk==3.0.1
